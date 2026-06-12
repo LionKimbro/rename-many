@@ -20,6 +20,12 @@ all in one pass.
 - **Visual diff** — rows whose new name differs from the original are
   highlighted, and the **Rename (n)** button shows a live count of pending
   changes. **Revert All** resets every edit.
+- **Algorithmic rename** — click **Algorithmically Rename…** to open a panel
+  with a Python code box. Your code runs once per item with `OLD` set to the
+  original name; set `NEW` to the name you want
+  (e.g., `NEW = OLD.replace(" ", "_").lower()`). Full Python is available,
+  including imports. While you type, a live preview fills the New-name column
+  every 2 seconds; errors (per row or syntax) are reported in the panel.
 - **Safety checks** — before anything touches the disk, the new names are
   validated: empty names, characters that are illegal in file names, trailing
   dots/spaces on Windows, and duplicate targets (including a new name

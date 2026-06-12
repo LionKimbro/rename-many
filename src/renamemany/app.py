@@ -19,6 +19,16 @@ from tkinter import filedialog, messagebox
 CHANGED_BG = "#fff2a8"      # highlight for rows whose name was edited
 READONLY_BG = "#f0f0f0"     # background of the left (original name) column
 
+ALGO_HELP = (
+    "The code below runs once for every listed item.  Before each run, OLD is "
+    "set to the original\nname (a str); afterwards NEW is read back as the new "
+    "name.  Full Python is available (import re,\netc.).  While you edit, the "
+    "New-name column previews the result every 2 seconds — click Rename\n"
+    "when it looks right, or Revert All to discard."
+)
+
+_MISSING = object()         # sentinel: user code did not set NEW
+
 # Characters that may not appear in a file name on this platform.
 BAD_CHARS = '<>:"/\\|?*' if sys.platform == "win32" else "/"
 
@@ -33,10 +43,15 @@ class RenameManyApp:
         self.rows = []              # one dict per listed item
         self.entry_bg = None        # default Entry background, captured lazily
 
+        self.algo_visible = False
+        self._algo_after_id = None  # pending after() callback for the preview
+        self._algo_last_code = None # code as of the last preview run
+
         self._build_path_bar()
         self._build_header()
         self._build_main_area()
         self._build_bottom_bar()
+        self._build_algo_panel()
 
     # ------------------------------------------------------------------ UI
 
@@ -95,7 +110,7 @@ class RenameManyApp:
             "<Button-5>", lambda e: self.canvas.yview_scroll(3, "units"))
 
     def _build_bottom_bar(self):
-        bar = tk.Frame(self.root)
+        bar = self.bottom_bar = tk.Frame(self.root)
         bar.pack(fill="x", padx=8, pady=(4, 8))
         self.rename_btn = tk.Button(bar, text="Rename (0)", state="disabled",
                                     command=self.do_rename)
@@ -103,8 +118,38 @@ class RenameManyApp:
         self.revert_btn = tk.Button(bar, text="Revert All",
                                     command=self.revert_all)
         self.revert_btn.pack(side="right", padx=4)
+        self.algo_btn = tk.Button(bar, text="Algorithmically Rename…",
+                                  command=self.toggle_algo_panel)
+        self.algo_btn.pack(side="right")
         self.status = tk.Label(bar, text="Pick a folder to begin.", anchor="w")
         self.status.pack(side="left", fill="x", expand=True)
+
+    def _build_algo_panel(self):
+        # Built once, packed/unpacked by toggle_algo_panel().
+        self.algo_frame = tk.Frame(self.root, bd=1, relief="groove")
+        tk.Label(self.algo_frame, text=ALGO_HELP, justify="left",
+                 anchor="w").pack(fill="x", padx=6, pady=(6, 2))
+
+        body = tk.Frame(self.algo_frame)
+        body.pack(fill="x", padx=6)
+        self.algo_text = tk.Text(body, height=8, undo=True,
+                                 font="TkFixedFont")
+        sb = tk.Scrollbar(body, orient="vertical",
+                          command=self.algo_text.yview)
+        self.algo_text.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.algo_text.pack(side="left", fill="both", expand=True)
+        self.algo_text.insert(
+            "1.0", '# Example: NEW = OLD.replace(" ", "_")\nNEW = OLD\n')
+
+        btns = tk.Frame(self.algo_frame)
+        btns.pack(fill="x", padx=6, pady=(2, 6))
+        self.algo_status = tk.Label(btns, text="", anchor="w")
+        self.algo_status.pack(side="left", fill="x", expand=True)
+        tk.Button(btns, text="Close",
+                  command=self.toggle_algo_panel).pack(side="right")
+        tk.Button(btns, text="Run Now",
+                  command=self._run_algorithm).pack(side="right", padx=4)
 
     # ------------------------------------------------------------- actions
 
@@ -170,6 +215,76 @@ class RenameManyApp:
     def revert_all(self):
         for row in self.rows:
             row["var"].set(row["name"])
+
+    # -------------------------------------------------- algorithmic rename
+
+    def toggle_algo_panel(self):
+        if self.algo_visible:
+            self.algo_visible = False
+            self.algo_frame.pack_forget()
+            if self._algo_after_id is not None:
+                self.root.after_cancel(self._algo_after_id)
+                self._algo_after_id = None
+        else:
+            self.algo_visible = True
+            self.algo_frame.pack(fill="x", padx=8, pady=(0, 4),
+                                 before=self.bottom_bar)
+            self.algo_text.focus_set()
+            # Don't run until the user actually edits the code.
+            self._algo_last_code = self.algo_text.get("1.0", "end-1c")
+            self._algo_after_id = self.root.after(2000, self._algo_tick)
+
+    def _algo_tick(self):
+        self._algo_after_id = None
+        if not self.algo_visible:
+            return
+        code = self.algo_text.get("1.0", "end-1c")
+        if code != self._algo_last_code:
+            self._run_algorithm()
+        self._algo_after_id = self.root.after(2000, self._algo_tick)
+
+    def _run_algorithm(self):
+        code = self.algo_text.get("1.0", "end-1c")
+        self._algo_last_code = code
+        if not code.strip():
+            self.algo_status.configure(text="")
+            return
+        try:
+            compiled = compile(code, "<algorithm>", "exec")
+        except SyntaxError as exc:
+            self.algo_status.configure(text=f"Syntax error: {exc}")
+            return
+        if not self.rows:
+            self.algo_status.configure(
+                text="No folder loaded — nothing to preview.")
+            return
+
+        updated = errors = 0
+        first_error = None
+        for row in self.rows:
+            globs = {"OLD": row["name"]}
+            try:
+                exec(compiled, globs)
+                new = globs.get("NEW", _MISSING)
+                if new is _MISSING:
+                    raise NameError("code did not set NEW")
+                if not isinstance(new, str):
+                    raise TypeError(
+                        f"NEW is {type(new).__name__}, expected str")
+            except Exception as exc:  # user code can raise anything
+                errors += 1
+                if first_error is None:
+                    first_error = (f'{row["name"]}: '
+                                   f"{type(exc).__name__}: {exc}")
+                continue
+            if row["var"].get() != new:
+                row["var"].set(new)
+                updated += 1
+
+        text = f"Preview: {updated} name(s) updated"
+        if errors:
+            text += f"; {errors} error(s) — first: {first_error}"
+        self.algo_status.configure(text=text)
 
     def do_rename(self):
         if self.folder is None:
